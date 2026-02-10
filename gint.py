@@ -1,3 +1,4 @@
+import os
 import time
 import pygame
 from pygame.locals import *
@@ -35,7 +36,21 @@ IMAGE_RGB565 = 2
 
 # Pygame initialization
 pygame.init()
-screen = pygame.display.set_mode((DWIDTH, DHEIGHT))
+
+# Check for scaling
+SCALE = 1
+if "GDK_SCALE" in os.environ:
+    try:
+        SCALE = int(os.environ["GDK_SCALE"])
+    except ValueError:
+        pass
+elif "QT_SCALE_FACTOR" in os.environ:
+    try:
+        SCALE = int(float(os.environ["QT_SCALE_FACTOR"]))
+    except ValueError:
+        pass
+
+screen = pygame.display.set_mode((DWIDTH * SCALE, DHEIGHT * SCALE))
 pygame.display.set_caption("ClassPad")
 vram = pygame.Surface((DWIDTH, DHEIGHT))
 clock = pygame.time.Clock()
@@ -95,7 +110,12 @@ def dclear(color: int):
 
 def dupdate():
     """Update display with VRAM changes"""
-    screen.blit(vram, (0, 0))
+    if SCALE == 1:
+        screen.blit(vram, (0, 0))
+    else:
+        scaled = pygame.transform.scale(vram, (DWIDTH * SCALE, DHEIGHT * SCALE))
+        screen.blit(scaled, (0, 0))
+
     pygame.display.flip()
     clock.tick(FPS)
 
@@ -670,14 +690,14 @@ def pollevent():
         
         # Handle mouse events as touch input
         elif event.type == MOUSEBUTTONDOWN:
-            return KeyEvent(KEYEV_TOUCH_DOWN, None, event.pos)
+            return KeyEvent(KEYEV_TOUCH_DOWN, None, (event.pos[0] // SCALE, event.pos[1] // SCALE))
             
         elif event.type == MOUSEBUTTONUP:
-            return KeyEvent(KEYEV_TOUCH_UP, None, event.pos)
+            return KeyEvent(KEYEV_TOUCH_UP, None, (event.pos[0] // SCALE, event.pos[1] // SCALE))
             
         elif event.type == MOUSEMOTION:
             if event.buttons[0]:  # Left mouse button dragged
-                return KeyEvent(KEYEV_TOUCH_DRAG, None, event.pos)
+                return KeyEvent(KEYEV_TOUCH_DRAG, None, (event.pos[0] // SCALE, event.pos[1] // SCALE))
             
         elif event.type == KEYDOWN:
             # Capture Print Screen key to save VRAM
