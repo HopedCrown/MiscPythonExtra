@@ -46,7 +46,7 @@ class Node:
         self.children = []
         self.spans = [] # For text nodes: list of (text, type/style_id)
         self.style = Style()
-        
+
         # Computed Layout
         self.x = 0
         self.y = 0
@@ -73,40 +73,60 @@ def parse_inline(text):
     """
     Parses inline markdown: **bold**, `code`, [link](url).
     Returns a list of tuples: (text_content, style_mask, data)
-    style_mask: 0=Normal, 1=Bold, 2=Code, 3=Link
+    style_mask: 0=Normal, 1=Bold, 2=Code, 3=Link, 4=Italic, 5=Strikethrough
     """
     spans = []
     i = 0
     length = len(text)
-    
+
     current_text = ""
     current_style = 0 # 0=Normal
-    
+
+    def flush():
+        nonlocal current_text
+        if current_text:
+            spans.append((current_text, current_style, None))
+            current_text = ""
+
     while i < length:
         # Code backtick
         if text[i] == '`':
-            if current_text:
-                spans.append((current_text, current_style, None))
-                current_text = ""
-            
+            flush()
             if current_style == 2:
                 current_style = 0
             else:
                 current_style = 2
             i += 1
             continue
-            
-        # Bold **
-        if text[i:i+2] == '**':
-            if current_text:
-                spans.append((current_text, current_style, None))
-                current_text = ""
-            
+
+        # Bold ** or __
+        if i+1 < length and (text[i:i+2] == '**' or text[i:i+2] == '__'):
+            flush()
             if current_style == 1:
                 current_style = 0
             else:
                 current_style = 1
             i += 2
+            continue
+
+        # Strikethrough ~~
+        if i+1 < length and text[i:i+2] == '~~':
+            flush()
+            if current_style == 5:
+                current_style = 0
+            else:
+                current_style = 5
+            i += 2
+            continue
+
+        # Italic * or _
+        if text[i] == '*' or text[i] == '_':
+            flush()
+            if current_style == 4:
+                current_style = 0
+            else:
+                current_style = 4
+            i += 1
             continue
 
         # Link [text](url)
@@ -115,71 +135,82 @@ def parse_inline(text):
             if end_bracket != -1 and end_bracket + 1 < length and text[end_bracket+1] == '(':
                 end_paren = text.find(')', end_bracket + 1)
                 if end_paren != -1:
-                    if current_text:
-                        spans.append((current_text, current_style, None))
-                        current_text = ""
-                    
+                    flush()
                     link_text = text[i+1:end_bracket]
                     link_url = text[end_bracket+2:end_paren]
-                    
+
                     spans.append((link_text, 3, link_url)) # 3 = Link
                     i = end_paren + 1
                     continue
-            
+
         current_text += text[i]
         i += 1
 
-    if current_text:
-        spans.append((current_text, current_style, None))
-        
+    flush()
+
     return spans
+
+def get_quote_depth_content(line):
+    # Count leading '>' chars, ignoring spaces
+    # Actually, Markdown spec allows space between '>'
+    # "> >" is depth 2.
+    # ">>" is depth 2.
+    # "> text" is depth 1.
+    depth = 0
+    content = line
+    while content.startswith('>'):
+        depth += 1
+        content = content[1:].strip()
+    return depth, content
 
 def parse_markdown(md_text):
     root = Node('root')
     root.style.padding = [10, 5, 10, 5]
-    
+
     lines = md_text.replace('\r\n', '\n').split('\n')
-    
+
     i = 0
     n_lines = len(lines)
-    
+
     while i < n_lines:
         line = lines[i]
+        # Check indentation for lists
+        indent = len(line) - len(line.lstrip())
         stripped = line.strip()
-        
+
         # 1. Empty lines
         if not stripped:
             i += 1
             continue
-            
+
         # 2. Syntax Checking
-        
+
         # Headers
         if stripped.startswith('#'):
             level = 0
             for char in stripped:
                 if char == '#': level += 1
                 else: break
-            
+
             content = stripped[level:].strip()
-            
+
             node = Node('header', root)
             node.style.block = True
             node.style.margin = [10 if level == 1 else 15, 0, 10, 0]
-            node.style.font_scale = 1 
-            
+            node.style.font_scale = 1
+
             if level <= 2:
                 node.style.border = [0, 0, 2, 0] # Bottom border
                 node.style.padding = [0, 0, 5, 0]
                 node.style.bg_color = C_WHITE
-            
+
             node.spans = parse_inline(content)
             root.add_child(node)
             i += 1
             continue
-            
+
         # Horizontal Rule
-        if stripped.startswith('---'):
+        if stripped.startswith('---') or stripped.startswith('***'):
             node = Node('hr', root)
             node.style.margin = [10, 0, 10, 0]
             node.style.h = 2
@@ -187,30 +218,38 @@ def parse_markdown(md_text):
             root.add_child(node)
             i += 1
             continue
-            
+
         # Block Quotes
-        if stripped.startswith('> '):
-            quote_text = stripped[2:].strip()
+        if stripped.startswith('>'):
+            # Detect initial depth
+            depth, quote_text = get_quote_depth_content(stripped)
+
             i += 1
             while i < n_lines:
                 next_line = lines[i].strip()
                 if not next_line: break
-                if any(next_line.startswith(x) for x in ['#', '-', '```', '---']): break
-                
+                if any(next_line.startswith(x) for x in ['#', '-', '*', '+', '```', '---']): break
+
                 # Check for > continuation or lazy continuation
-                if next_line.startswith('> '):
-                    quote_text += " " + next_line[2:].strip()
+                if next_line.startswith('>'):
+                    next_depth, next_content = get_quote_depth_content(next_line)
+                    if next_depth != depth:
+                        break # Depth changed, start new blockquote node
+                    quote_text += " " + next_content
                 else:
+                    # Lazy continuation (depth 0, effectively)
+                    # Standard markdown says this belongs to current blockquote
                     quote_text += " " + next_line
                 i += 1
-            
+
             node = Node('blockquote', root)
-            node.style.margin = [5, 0, 5, 0]
+            # Indent based on depth
+            node.style.margin = [5, 0, 5, (depth - 1) * 20]
             node.style.padding = [5, 5, 5, 10]
             node.style.border = [0, 0, 0, 2] # Left border
             node.style.bg_color = 0xEF5D # Light Gray
             node.style.border_color = C_QUOTE_BAR # Silver
-            
+
             node.spans = parse_inline(quote_text)
             root.add_child(node)
             continue
@@ -225,7 +264,7 @@ def parse_markdown(md_text):
                     break
                 code_lines.append(lines[i]) # Preserve indentation
                 i += 1
-            
+
             node = Node('code_block', root)
             node.style.pre = True
             node.style.bg_color = C_CODE_BG
@@ -234,42 +273,45 @@ def parse_markdown(md_text):
             node.style.margin = [5, 0, 5, 0]
             node.style.border = [1, 1, 1, 1]
             # Use default border color (Black) for code blocks
-            
+
             full_code = "\n".join(code_lines)
             node.spans = [(full_code, 2, None)] # Style 2 = Code
-            
+
             root.add_child(node)
             continue
-            
+
         # List Items
-        if stripped.startswith('- '):
+        if stripped.startswith('- ') or stripped.startswith('* ') or stripped.startswith('+ '):
             content = stripped[2:].strip()
             node = Node('list_item', root)
-            node.style.margin = [2, 0, 2, 5] 
+
+            indent_level = indent // 2
+
+            node.style.margin = [2, 0, 2, 5 + (indent_level * 10)]
             node.style.padding = [0, 0, 0, 12] # Indent content for bullet
-            
+
             # No bullet in text, drawn manually
             node.spans = parse_inline(content)
             root.add_child(node)
             i += 1
             continue
-            
+
         # Paragraphs
         para_text = stripped
         i += 1
         while i < n_lines:
             next_line = lines[i].strip()
             if not next_line: break
-            if any(next_line.startswith(x) for x in ['#', '-', '```', '---', '>']): break
-            
+            if any(next_line.startswith(x) for x in ['#', '-', '*', '+', '```', '---', '>']): break
+
             para_text += " " + next_line
             i += 1
-            
+
         node = Node('paragraph', root)
         node.style.margin = [0, 0, 8, 0]
         node.spans = parse_inline(para_text)
         root.add_child(node)
-        
+
     return root
 
 # --- Layout Engine ---
@@ -279,48 +321,48 @@ def get_wrapped_lines(spans, max_width, is_pre=False):
     Wraps text spans into lines using dsize logic.
     """
     lines = []
-    
+
     if is_pre:
         # Code block: Sanitized, allow wrap per line.
         raw_text = sanitize_text(spans[0][0])
         style = spans[0][1]
         data = spans[0][2]
-        
+
         # Split by hard newlines
         hard_lines = raw_text.split('\n')
         for hl in hard_lines:
-            if not hl: 
+            if not hl:
                 # Empty line -> add empty line
-                lines.append([]) 
+                lines.append([])
                 continue
-            
+
             # Recursively wrap each hard line
             # Treat as normal text (is_pre=False)
             wrapped_subs = get_wrapped_lines([(hl, style, data)], max_width, False)
             if not wrapped_subs: lines.append([])
             else: lines.extend(wrapped_subs)
-            
+
         return lines
 
     # Normal Wrapping
-    current_line = [] 
+    current_line = []
     current_w = 0
     space_w, _ = dsize(" ", None)
-    
+
     for text, style, data in spans:
         clean_text = sanitize_text(text)
         words = clean_text.split(' ')
-        
+
         for idx, word in enumerate(words):
-            if not word: continue 
-            
+            if not word: continue
+
             word_w, _ = dsize(word, None)
-            
+
             # Determine space before this word
             add_space = False
             if idx > 0 or (current_w > 0 and current_line and not current_line[-1][0].endswith(" ")):
                 add_space = True
-            
+
             space_w_curr = space_w if add_space else 0
 
             # Wrap if overflows
@@ -328,46 +370,46 @@ def get_wrapped_lines(spans, max_width, is_pre=False):
                 lines.append(current_line)
                 current_line = []
                 current_w = 0
-                space_w_curr = 0 
-            
+                space_w_curr = 0
+
             # Append content
             prefix = " " if space_w_curr else ""
             current_line.append((prefix + word, style, data))
             current_w += space_w_curr + word_w
-            
+
     if current_line:
         lines.append(current_line)
-        
+
     return lines
 
 def resolve_layout(node, container_w):
     s = node.style
-    
+
     # Margins/Padding
     avail_w = container_w - s.margin[1] - s.margin[3] - s.border[1] - s.border[3]
     content_w = avail_w - s.padding[1] - s.padding[3]
-    
-    node.w = container_w 
-    
+
+    node.w = container_w
+
     # Children or Content?
     current_h = s.padding[0] + s.border[0]
-    
+
     if node.spans:
         # It's a text/leaf node
         lines = get_wrapped_lines(node.spans, content_w, s.pre)
         node.lines = lines
-        text_h = len(lines) * LINE_H 
+        text_h = len(lines) * LINE_H
         current_h += text_h
     else:
         # Container
         for child in node.children:
             resolve_layout(child, content_w)
-            
+
             child.x = s.margin[3] + s.border[3] + child.style.margin[3] + s.padding[3]
             child.y = current_h + child.style.margin[0]
-            
+
             current_h += child.h + child.style.margin[0] + child.style.margin[2]
-            
+
     node.h = current_h + s.padding[2] + s.border[2]
 
 # --- Rendering ---
@@ -375,33 +417,33 @@ def resolve_layout(node, container_w):
 def draw_node(node, abs_x, abs_y, scroll_y, hotspots=None):
     screen_x = abs_x + node.x
     screen_y = abs_y + node.y - scroll_y
-    
+
     # Cull
     if screen_y > SCREEN_H or screen_y + node.h < HEADER_H:
-         return 
+         return
 
     s = node.style
-    
+
     # Background
     bb_w = node.w - s.margin[1] - s.margin[3]
     if s.bg_color != -1:
         drect(screen_x, screen_y, screen_x + bb_w, screen_y + node.h, s.bg_color)
-        
+
     # Borders
-    
+
     # Top
     if s.border[0] > 0:
         drect(screen_x, screen_y, screen_x + bb_w, screen_y + s.border[0], s.border_color)
-        
+
     # Right
     if s.border[1] > 0:
         drect(screen_x + bb_w - s.border[1], screen_y, screen_x + bb_w, screen_y + node.h, s.border_color)
 
     # Bottom
-    if s.border[2] > 0: 
+    if s.border[2] > 0:
         by = screen_y + node.h - s.border[2]
         drect(screen_x, by, screen_x + bb_w, screen_y + node.h, s.border_color)
-        
+
     # Left
     if s.border[3] > 0:
         drect(screen_x, screen_y, screen_x + s.border[3], screen_y + node.h, s.border_color)
@@ -417,18 +459,18 @@ def draw_node(node, abs_x, abs_y, scroll_y, hotspots=None):
     if node.lines:
         txt_y = screen_y + s.padding[0] + s.border[0]
         txt_x_start = screen_x + s.padding[3] + s.border[3]
-        
+
         for line in node.lines:
             curr_x = txt_x_start
-            
+
             if txt_y + LINE_H > HEADER_H and txt_y < SCREEN_H:
                 for text, style_id, style_data in line:
                     col = s.color
                     t_w, _ = dsize(text, None)
-                    
+
                     # Style modifications
                     if style_id == 2 and not s.pre: # Inline Code Highlight ONLY
-                         drect(curr_x + 1, txt_y + 1, curr_x + t_w, txt_y + LINE_H - 3, 0xCE79) 
+                         drect(curr_x + 1, txt_y + 1, curr_x + t_w, txt_y + LINE_H - 3, 0xCE79)
                     elif style_id == 1: # Bold
                          dtext(curr_x+1, txt_y + TEXT_Y_OFFSET, col, text)
                     elif style_id == 3: # Link
@@ -436,10 +478,12 @@ def draw_node(node, abs_x, abs_y, scroll_y, hotspots=None):
                          dline(curr_x, txt_y + LINE_H - 2, curr_x + t_w, txt_y + LINE_H - 2, C_BLUE)
                          if hotspots is not None:
                              hotspots.append(((curr_x, txt_y, t_w, LINE_H), style_data))
-                    
+                    elif style_id == 5: # Strikethrough
+                         dline(curr_x, txt_y + LINE_H // 2, curr_x + t_w, txt_y + LINE_H // 2, col)
+
                     dtext(curr_x, txt_y + TEXT_Y_OFFSET, col, text)
                     curr_x += t_w
-            
+
             txt_y += LINE_H
 
     # Children
@@ -468,7 +512,7 @@ def draw_header(title):
     drect(0, 0, 40, HEADER_H, 0x8410) # Clear area
     draw_icon_menu(10, 10, C_WHITE)
     dtext(50, 16, C_WHITE, title)
-    
+
     drect(0, HEADER_H, SCREEN_W, HEADER_H+2, C_BLACK) # Separator
 
 def do_menu(current_file):
@@ -477,20 +521,20 @@ def do_menu(current_file):
         "Quit"
     ]
     choice = cinput.pick(opts, "Menu")
-    
+
     if choice == "Open...":
         fname = cinput.input("File to open:")
         if fname: return fname
     elif choice == "Quit":
         return "QUIT"
-    
+
     return None
 
 def main():
     # Initial Load
     path = "1.md"
     dom = None
-    
+
     def load(fname):
         nonlocal dom, path
         try:
@@ -510,37 +554,37 @@ def main():
             path = fname
 
     load(path)
-    
+
     scroll_y = 0
     running = True
     touch_latched = False
-    
+
     clearevents()
-    
+
     while running:
         dclear(C_WHITE)
-        
+
         # Max Scroll Update
         max_scroll = max(0, dom.h - (SCREEN_H - HEADER_H))
-        
+
         # Hotspots
         hotspots = []
-        
+
         # Draw Document
         draw_node(dom, 0, HEADER_H + 5, scroll_y, hotspots)
-        
+
         # Draw Header
         draw_header(path)
-        
+
         # Scrollbar
         if dom.h > (SCREEN_H - HEADER_H):
             view_h = SCREEN_H - HEADER_H
             sb_h = max(20, int((view_h / dom.h) * view_h))
             sb_y = HEADER_H + int((scroll_y / dom.h) * view_h)
             drect(SCREEN_W-5, sb_y, SCREEN_W, sb_y+sb_h, 0x8410)
-        
+
         dupdate()
-        
+
         # Events
         cleareventflips()
         events = []
@@ -548,7 +592,7 @@ def main():
         while ev.type != KEYEV_NONE:
             events.append(ev)
             ev = pollevent()
-            
+
         for e in events:
             if e.type == KEYEV_DOWN:
                 if e.key == KEY_EXIT:
@@ -560,14 +604,14 @@ def main():
                 elif e.key == KEY_MENU or e.key == KEY_F1:
                     res = do_menu(path)
                     if res == "QUIT": running = False
-                    elif res: 
+                    elif res:
                         load(res)
                         scroll_y = 0
                     clearevents()
-            
+
             elif e.type == KEYEV_TOUCH_UP:
                 touch_latched = False
-                
+
             elif e.type == KEYEV_TOUCH_DOWN:
                 if not touch_latched:
                     touch_latched = True
@@ -576,7 +620,7 @@ def main():
                         if e.x < 50: # Menu area
                             res = do_menu(path)
                             if res == "QUIT": running = False
-                            elif res: 
+                            elif res:
                                 load(res)
                                 scroll_y = 0
                             clearevents()
@@ -591,9 +635,9 @@ def main():
                                     clicked_link = True
                                     clearevents()
                                     break
-                                    
+
                         if not clicked_link:
-                            # Drag scroll? 
+                            # Drag scroll?
                             pass
 
     print("Done")
