@@ -236,9 +236,15 @@ def parse_markdown(md_text):
 
                     # Parse Separator (Alignment)
                     alignments = [] # 0=Left, 1=Center, 2=Right
+                    sep_weights = [] # Width weight based on --- length
                     sep_cells = [c.strip() for c in next_line.strip('|').split('|')]
 
                     for sep in sep_cells:
+                        # Weight calc: count dashes
+                        dashes = sep.count('-')
+                        if dashes < 1: dashes = 1
+                        sep_weights.append(dashes)
+
                         if sep.startswith(':') and sep.endswith(':'):
                             alignments.append(1)
                         elif sep.endswith(':'):
@@ -250,6 +256,7 @@ def parse_markdown(md_text):
                     table_node.style.margin = [10, 0, 10, 0]
                     table_node.style.border = [1, 1, 1, 1]
                     table_node.col_alignments = alignments
+                    table_node.col_weights = sep_weights
                     table_node.col_count = len(header_cells)
 
                     # Add Header Row
@@ -517,35 +524,26 @@ def resolve_layout(node, container_w):
 
     if node.type == 'table':
         # Table Layout Logic
-        # 1. Calculate max width for each column based on content
-        col_widths = [0] * node.col_count
+        # Use Weights from --- separator lines
+        total_weight = sum(node.col_weights)
+        if total_weight == 0: total_weight = 1 # avoid div by zero
 
-        # We need to temporarily resolve children to find their content widths
-        # This is a bit tricky since we don't know widths yet.
-        # Approximation: Measure text width of each cell
+        col_widths = []
+        for w in node.col_weights:
+            # Calculate width based on weight ratio
+            cw = int((w / total_weight) * content_w)
+            if cw < 20: cw = 20 # Minimum width
+            col_widths.append(cw)
 
-        rows = node.children
-        for row in rows:
-            for i, cell in enumerate(row.children):
-                if i < len(col_widths):
-                    # Measure cell content (unwrapped)
-                    w = 0
-                    for txt, _, _ in cell.spans:
-                        tw, _ = dsize(txt, None)
-                        w += tw
-                    col_widths[i] = max(col_widths[i], w + 10) # + padding
-
-        # 2. Distribute available width
-        total_req_w = sum(col_widths)
-        if total_req_w > content_w:
-            # Shrink proportionally
-            scale = content_w / total_req_w
-            col_widths = [int(w * scale) for w in col_widths]
-        else:
-            # Expand to fill? Or just center? Let's just use computed widths
-            pass
+        # Re-adjust if we exceeded content_w due to min-width
+        if sum(col_widths) > content_w:
+             # Scale down uniformly or just clip? Let's verify
+             # Simple approach: Recalculate if needed, but for now strict weight
+             scale = content_w / sum(col_widths)
+             col_widths = [int(cw * scale) for cw in col_widths]
 
         # 3. Layout Rows/Cells
+        rows = node.children # Define rows since we removed the previous block
         current_h = s.padding[0] + s.border[0]
 
         for row in rows:
